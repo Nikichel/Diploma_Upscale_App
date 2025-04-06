@@ -1,0 +1,10 @@
+fastapi>=0.68.0
+uvicorn>=0.15.0
+python-multipart>=0.0.5
+torch>=2.0.0
+numpy>=1.21.0
+Pillow>=8.3.1
+pyngrok>=5.1.0
+nest-asyncio>=1.5.1
+python-ngrok>=0.1.0
+albumentations>=1.3.0 
