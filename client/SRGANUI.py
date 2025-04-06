@@ -311,6 +311,8 @@ class SRGANUI:
                     st.success("Вход выполнен успешно! 🎉")
                     st.session_state.selected_page = "Home"
                     time.sleep(1)
+                    current_user = self.client.get_current_user(token)
+                    self.controller.set("user_balance", current_user["money"], max_age=31556925)
                     st.rerun()
                 else:
                     st.error("Неверный email или пароль")

@@ -1,14 +1,15 @@
 from pydantic import BaseModel, EmailStr
 from typing import Optional
 
-class UserCreate(BaseModel):
+class UserBase(BaseModel):
     email: EmailStr
+
+class UserCreate(UserBase):
     password: str
 
-class UserInDB(BaseModel):
-    email: EmailStr
-    hashed_password: str
-    money: int
+class UserPublic(UserBase):
+    id: int
+    money: int = 0
 
 class Token(BaseModel):
     access_token: str
@@ -16,7 +17,6 @@ class Token(BaseModel):
 
 class TokenData(BaseModel):
     email: Optional[str] = None
-
 
 
 
@@ -33,3 +33,10 @@ class User(Base):
     email = Column(String, unique=True, index=True)
     hashed_password = Column(String)
     money = Column(Integer, default=0)
+
+    def to_public(self):
+        return UserPublic(
+            id=self.id,
+            email=self.email,
+            money=self.money
+        )

@@ -112,3 +112,9 @@ class SRGANClient:
         except Exception as e:
             self.logger.log_error(e, "upscale_image")
             return {"error": str(e)}
+        
+    def get_current_user(self, token: str):
+        headers = {"Authorization": f"Bearer {token}"}
+        response = requests.get(f"{self.base_url}/users/me", headers=headers)
+        response.raise_for_status()
+        return response.json()

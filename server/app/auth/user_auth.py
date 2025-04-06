@@ -1,24 +1,24 @@
 from datetime import datetime, timedelta
 import jwt
-from jwt import PyJWTError as JWTError
-from passlib.context import CryptContext
-from typing import List, Optional
+from jwt import PyJWTError
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
-import os
 from models.user import *
+from db.db_manager import DBManager
+from passlib.context import CryptContext
+import os
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Аутентификация
 oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
 
 class UserAuth:
-    def __init__(self):
-        self.SECRET_KEY = os.environ.get("SECRET_KEY")
-        self.ALGORITHM = os.environ.get("ALGORITHM")
-        self.ACCESS_TOKEN_EXPIRE_MINUTES = int(os.environ.get("ACCESS_TOKEN_EXPIRE_MINUTES"))
+    def __init__(self, db_manager: DBManager):
+        self.db_manager = db_manager
+        self.SECRET_KEY = os.getenv("SECRET_KEY", "secret")
+        self.ALGORITHM = os.getenv("ALGORITHM", "HS256")
+        self.ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
         self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 
     def verify_password(self, plain_password: str, hashed_password: str) -> bool:
@@ -33,7 +33,7 @@ class UserAuth:
         to_encode.update({"exp": expire})
         return jwt.encode(to_encode, self.SECRET_KEY, algorithm=self.ALGORITHM)
 
-    async def get_current_user(self, token: str = Depends(oauth2_scheme), users_db: List[UserInDB] = None):
+    async def get_current_user(self, token: str = Depends(oauth2_scheme)) -> User:
         credentials_exception = HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Could not validate credentials",
@@ -44,10 +44,12 @@ class UserAuth:
             email: str = payload.get("sub")
             if email is None:
                 raise credentials_exception
-        except JWTError:
+        except PyJWTError:
             raise credentials_exception
 
-        user = next((user for user in users_db if user.email == email), None)
+        async with self.db_manager.get_db() as db:
+            user = await self.db_manager.get_user_by_email(email, db)
+        
         if user is None:
             raise credentials_exception
         return user

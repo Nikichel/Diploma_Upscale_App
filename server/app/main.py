@@ -5,6 +5,10 @@ import uvicorn
 import signal
 import sys
 import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
 class Server:
     def __init__(self):
         self.logger = ServerLogger()
@@ -45,7 +49,8 @@ class Server:
             self.logger.info("Запуск сервера...")
             config = uvicorn.Config(
                 app=self.app.app,
-                host=os.getenv("API_URL"),
+                #host=os.getenv("API_URL"),
+                host="127.0.0.1",
                 port=8000,
                 log_level="info"
             )
