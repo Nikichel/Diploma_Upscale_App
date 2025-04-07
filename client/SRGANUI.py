@@ -1,10 +1,8 @@
 import streamlit as st
-import requests
 from PIL import Image
 import io
 import base64
 import time
-import asyncio
 from utils.client_logger import ClientLogger
 from SRGANClient import SRGANClient
 import os
@@ -60,10 +58,8 @@ class SRGANUI:
 
     def clear_auth_data(self):
         """Очистка данных аутентификации"""
-        if hasattr(st.session_state, 'is_authenticated'):
-            st.session_state.is_authenticated = False
-        if hasattr(st.session_state, 'access_token'):
-            st.session_state.access_token = None
+        st.session_state.is_authenticated = False
+        st.session_state.access_token = None
         
         try:
             for key in list(self.controller.getAll().keys()):
@@ -336,7 +332,8 @@ class SRGANUI:
     def show_money_panel(self):
         if not st.session_state.is_authenticated:
             return
-        balance = self.controller.get("user_balance") or 0
+        current_user = self.client.get_current_user(st.session_state.access_token)
+        balance = current_user["money"] or 0
 
         panel_html = f"""
         <div class="currency-panel">
@@ -389,7 +386,7 @@ class SRGANUI:
         elif st.session_state.selected_page == "Log In":
             if st.session_state.is_authenticated:
                 st.session_state.selected_page = "Home"
-                st.rerun()
+                #st.rerun()
                 return
             self.render_login()
         elif st.session_state.selected_page == "For the first time?":
@@ -403,4 +400,5 @@ class SRGANUI:
             st.success("Вы успешно вышли из системы")
             time.sleep(1)
             st.session_state.selected_page = "Log In"
+            # st.rerun()
             return

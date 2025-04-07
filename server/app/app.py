@@ -59,6 +59,7 @@ class FastAPIApp:
     async def deduct_credits(self, user: User, scale_factor: int, use_decoration: bool):
         cost = 0
         
+        # Расчет стоимости
         if scale_factor in [2]:
             cost += 1
         elif scale_factor in [4]:
@@ -108,6 +109,9 @@ class FastAPIApp:
             result = await self.srgan.upscale_image(contents, scale_factor)
             
             if not result:
+                # Возвращаем кредиты при ошибке обработки
+                async with self.db_manager.get_db() as db:
+                    await self.db_manager.update_user_balance(updated_user, deducted, db)
                 raise HTTPException(status_code=500, detail="Ошибка при обработке изображения")
             
             return {

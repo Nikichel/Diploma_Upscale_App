@@ -48,3 +48,18 @@ class DBManager:
         await db.commit()
         await db.refresh(user)
         return user
+    
+    async def deduct_credits(self, user: User, amount: int, db: AsyncSession) -> User:
+        """Списание кредитов с баланса пользователя"""
+        # Получаем актуальную версию пользователя из БД
+        db_user = await db.get(User, user.id)
+        if not db_user:
+            raise ValueError("Пользователь не найден")
+        
+        if db_user.money < amount:
+            raise ValueError("Недостаточно средств на счете")
+        
+        db_user.money -= amount
+        await db.commit()
+        await db.refresh(db_user)
+        return db_user
