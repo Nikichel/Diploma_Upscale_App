@@ -51,7 +51,7 @@
 ```bash
 git clone https://github.com/yourusername/resup.git
 cd resup
-```bash
+```
 
 2. Настройка окружения
 Установите:
@@ -77,25 +77,25 @@ cd resup
 	SECRET_KEY=your_secret_key  
 	ALGORITHM=HS256  
 	PATH_TO_MODEL=gen_and_disc.pth 
-```bash
+```
 4. Запуск PostgreSQL
 
 5. Установка зависимостей
 ```bash
 	pip install -r requirements.txt  
-```bash
+```
 6. Запуск сервера
 ```bash
 	cd server  
 	python app/main.py
-```bash
+```
 	Сервер запустится на http://localhost:8000.
 
 7. Запуск клиента (Streamlit)
 ```bash
 	cd client  
 	streamlit run streamlit_app.py
-```bash
+```
 	Клиент откроется в браузере на http://localhost:8501.
 
 8. Тестирование Stripe
