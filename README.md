@@ -28,6 +28,10 @@
 |---------------------|-----------------------|-------------------------|--------------------------|
 | <img src="demo/orig_ship.png" width="400"> | <img src="demo/x2_enhanced_ship.png" width="400"> | <img src="demo/x4_enhanced _ship.png" width="400"> | <img src="demo/x8_enhanced _ship.png" width="400"> |
 
+| Оригинал | x2 Upscale | x4 Upscale | x8 Upscale |
+|---------------------|-----------------------|-------------------------|--------------------------|
+| <img src="demo/orig_flower.png" width="400"> | <img src="demo/upscaled_x2_flower.png" width="400"> | <img src="demo/upscaled_x4_flower.png" width="400"> | <img src="demo/upscaled_x8_flower.png" width="400"> |
+
 ## Технологический стек ⚙️
 **Клиент:**
 - Streamlit (UI)
