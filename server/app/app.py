@@ -14,6 +14,7 @@ from db.db_manager import DBManager
 from db.config import settings
 from models.user import *
 from auth.user_auth import UserAuth, oauth2_scheme
+from db.model_db import User
 
 load_dotenv()
 
@@ -99,21 +100,32 @@ class FastAPIApp:
         ):
             if not hasattr(self.srgan, "model") or self.srgan.model is None:
                 raise HTTPException(status_code=500, detail="Модель не загружена")
-            
+
             try:
+                # Списание кредитов
                 deducted, updated_user = await self.deduct_credits(current_user, scale_factor, use_decoration)
             except HTTPException as e:
                 raise e
-            
-            contents = await file.read()
-            result = await self.srgan.upscale_image(contents, scale_factor)
-            
-            if not result:
-                # Возвращаем кредиты при ошибке обработки
+
+            try:
+                # Попытка обработки изображения
+                contents = await file.read()
+                result = await self.srgan.upscale_image(contents, scale_factor, use_decoration)
+            except HTTPException as e:
+                # Возврат кредитов при ошибках валидации (например, большой размер)
                 async with self.db_manager.get_db() as db:
-                    await self.db_manager.update_user_balance(updated_user, deducted, db)
+                    db_user = await db.get(User, current_user.id)  # Получаем пользователя из текущей сессии
+                    if db_user:
+                        await self.db_manager.update_user_balance(db_user, deducted, db)
+                raise e  # Пробрасываем ошибку клиенту
+            except Exception as e:
+                # Возврат кредитов при других ошибках
+                async with self.db_manager.get_db() as db:
+                    db_user = await db.get(User, current_user.id)  # Получаем пользователя из текущей сессии
+                    if db_user:
+                        await self.db_manager.update_user_balance(db_user, deducted, db)
                 raise HTTPException(status_code=500, detail="Ошибка при обработке изображения")
-            
+
             return {
                 "status": "success", 
                 "image": result,
@@ -128,7 +140,7 @@ class FastAPIApp:
                 if existing_user:
                     raise HTTPException(
                         status_code=status.HTTP_400_BAD_REQUEST,
-                        detail="Email already registered"
+                        detail="Пользователь с таким email существует"
                     )
                 
                 new_user = await self.db_manager.add_user(user, db)
@@ -138,11 +150,18 @@ class FastAPIApp:
         async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
             async with self.db_manager.get_db() as db:
                 user = await self.db_manager.get_user_by_email(form_data.username, db)
-                
-            if not user or not self.auth.verify_password(form_data.password, user.hashed_password):
+
+            if not user:
                 raise HTTPException(
                     status_code=status.HTTP_401_UNAUTHORIZED,
-                    detail="Incorrect email or password",
+                    detail="Пользователя с таким email не существует",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+             
+            if not self.auth.verify_password(form_data.password, user.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Неправильный email или/и пароль",
                     headers={"WWW-Authenticate": "Bearer"},
                 )
             

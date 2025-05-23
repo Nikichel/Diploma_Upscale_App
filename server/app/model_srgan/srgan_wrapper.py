@@ -10,6 +10,8 @@ from utils.server_logger import ServerLogger
 import os
 import cv2
 
+from fastapi import HTTPException, status
+
 class SRGANWrapper:
     def __init__(self):
         """Инициализация обертки для модели SRGAN"""
@@ -37,6 +39,8 @@ class SRGANWrapper:
     
     async def upscale_image(self, image_data: bytes, scale_factor: int = 4, use_decoration: bool = False) -> Optional[str]:
         """Увеличение разрешения изображения с помощью SRGAN"""
+        max_shape = int(os.getenv("MAX_SHAPE", 1000))
+
         if not self.ready or self.model is None:
             self.logger.error("Model not loaded")
             raise RuntimeError("Модель SRGAN не загружена")
@@ -61,8 +65,11 @@ class SRGANWrapper:
             img_array = np.array(img)
             self.logger.debug(f"Image converted to array: shape={img_array.shape}")
             
-            if img_array.shape[0] > 600 or img_array.shape[1] > 600:
-                raise ValueError("Большое изображение")            
+            if img_array.shape[0] > max_shape or img_array.shape[1] > max_shape:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Изображение превышает {max_shape}x{max_shape} пикселей"
+                )        
 
             SR_image = await self.upscale_x4(use_decoration, img_array)
 
@@ -81,7 +88,7 @@ class SRGANWrapper:
             return img_str
         except Exception as e:
             self.logger.log_error(e, "upscale_image")
-            return None
+            raise e
 
     async def upscale_x4(self, use_decoration, img_array):
         pre_image = await self.preprocessing(img_array)

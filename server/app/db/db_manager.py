@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from typing import AsyncGenerator
 from models.user import *
 from passlib.context import CryptContext
+from db.model_db import User, Base
 
 pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
 

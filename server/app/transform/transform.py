@@ -20,7 +20,6 @@ class Transforms:
         """
         low_res_width = max(image_shape[1] // self.low_res_scale_factor, 1)
         low_res_height = max(image_shape[0] // self.low_res_scale_factor, 1)
-        # print(f"{low_res_width}\n {low_res_height}")
         return A.Compose(
             [
                 A.Resize(width=low_res_width, height=low_res_height, interpolation=Image.BICUBIC),

@@ -1,0 +1,873 @@
+# app.py
+
+from fastapi import FastAPI, Depends, HTTPException, UploadFile, File, Form, status
+from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
+from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+import os
+import asyncio
+import gc
+from model_srgan.srgan_wrapper import SRGANWrapper
+import stripe
+from dotenv import load_dotenv
+from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.future import select
+from db.db_manager import DBManager
+from db.config import settings
+from models.user import *
+from auth.user_auth import UserAuth, oauth2_scheme
+from db.model_db import User
+
+load_dotenv()
+
+class FastAPIApp:
+    def __init__(self):
+        self.db_manager = DBManager(settings.DB_URL)
+        self.auth = UserAuth(self.db_manager)
+        self.ready = False
+        
+        stripe.api_key = os.environ.get("STRIPE_SECRET_KEY")
+        self.stripe_public_key = os.environ.get("STRIPE_PUBLIC_KEY")
+        
+        self.app = FastAPI(
+            title="SRGAN Upscaler API", 
+            description="API для увеличения разрешения изображений с использованием SRGAN",
+            version="1.0.0"
+        )
+        
+        self.app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["*"],
+            allow_credentials=True,
+            allow_methods=["*"],
+            allow_headers=["*"],
+        )
+        
+        self.srgan = SRGANWrapper()
+        self.setup_routes()
+        self.app.add_event_handler("shutdown", self.cleanup)
+    
+    async def get_current_user(self, token: str = Depends(oauth2_scheme)):
+        return await self.auth.get_current_user(token)
+
+    async def load_model(self):
+        await self.srgan.load_model()
+        self.ready = True
+
+    async def cleanup(self):
+        if hasattr(self, "srgan") and hasattr(self.srgan, "model"):
+            del self.srgan.model
+            gc.collect()
+
+    async def deduct_credits(self, user: User, scale_factor: int, use_decoration: bool):
+        cost = 0
+        
+        # Расчет стоимости
+        if scale_factor in [2]:
+            cost += 1
+        elif scale_factor in [4]:
+            cost += 2
+        elif scale_factor == 8:
+            cost += 3
+        
+        if use_decoration:
+            cost += 5
+            
+        async with self.db_manager.get_db() as db:
+            try:
+                updated_user = await self.db_manager.deduct_credits(user, cost, db)
+                return cost, updated_user
+            except ValueError as e:
+                raise HTTPException(
+                    status_code=status.HTTP_402_PAYMENT_REQUIRED,
+                    detail=str(e)
+                )
+
+    def setup_routes(self):
+        @self.app.on_event("startup")
+        async def startup():
+            await self.db_manager.create_tables()
+            await self.load_model()
+        
+        @self.app.get("/")
+        async def root_path():
+            return {"status": "success", "response": "root"}
+    
+        @self.app.post("/upscale")
+        async def upscale_image(
+            file: UploadFile = File(...),
+            scale_factor: int = Form(4),
+            use_decoration: bool = Form(False),
+            current_user: User = Depends(self.get_current_user)
+        ):
+            if not hasattr(self.srgan, "model") or self.srgan.model is None:
+                raise HTTPException(status_code=500, detail="Модель не загружена")
+            
+            try:
+                deducted, updated_user = await self.deduct_credits(current_user, scale_factor, use_decoration)
+            except HTTPException as e:
+                raise e
+            
+            contents = await file.read()
+            result = await self.srgan.upscale_image(contents, scale_factor, use_decoration)
+            
+            if not result:
+                # Возвращаем кредиты при ошибке обработки
+                async with self.db_manager.get_db() as db:
+                    await self.db_manager.update_user_balance(updated_user, deducted, db)
+                raise HTTPException(status_code=500, detail="Ошибка при обработке изображения")
+            
+            return {
+                "status": "success", 
+                "image": result,
+                "deducted_credits": deducted,
+                "remaining_credits": updated_user.money
+            }
+
+        @self.app.post("/register", response_model=UserPublic)
+        async def register_user(user: UserCreate):
+            async with self.db_manager.get_db() as db:
+                existing_user = await self.db_manager.get_user_by_email(user.email, db)
+                if existing_user:
+                    raise HTTPException(
+                        status_code=status.HTTP_400_BAD_REQUEST,
+                        detail="Пользователь с таким email существует"
+                    )
+                
+                new_user = await self.db_manager.add_user(user, db)
+                return new_user.to_public()
+
+        @self.app.post("/token", response_model=Token)
+        async def login_for_access_token(form_data: OAuth2PasswordRequestForm = Depends()):
+            async with self.db_manager.get_db() as db:
+                user = await self.db_manager.get_user_by_email(form_data.username, db)
+
+            if not user:
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Пользователя с таким email не существует",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+             
+            if not self.auth.verify_password(form_data.password, user.hashed_password):
+                raise HTTPException(
+                    status_code=status.HTTP_401_UNAUTHORIZED,
+                    detail="Неправильный email или/и пароль",
+                    headers={"WWW-Authenticate": "Bearer"},
+                )
+            
+            access_token = self.auth.create_access_token(data={"sub": user.email})
+            return {"access_token": access_token, "token_type": "bearer"}
+
+        @self.app.get("/users/me", response_model=UserPublic)
+        async def read_users_me(current_user: User = Depends(self.get_current_user)):
+            return current_user.to_public()
+
+        @self.app.get("/token/validate")
+        async def validate_token(current_user: User = Depends(self.get_current_user)):
+            return {"valid": True, "email": current_user.email}
+
+        @self.app.get("/products")
+        async def get_products():
+            try:
+                products = stripe.Product.list(active=True, expand=['data.default_price'])
+                return {
+                    "status": "success",
+                    "products": products.data,
+                    "public_key": self.stripe_public_key
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.post("/create-checkout-session")
+        async def create_checkout_session(
+            price_id: str,
+            current_user: User = Depends(self.get_current_user)
+        ):
+            try:
+                BASE_URL = os.environ.get("BASE_URL", "http://localhost:8501")
+                checkout_session = stripe.checkout.Session.create(
+                    payment_method_types=['card'],
+                    line_items=[{"price": price_id, "quantity": 1}],
+                    mode='payment',
+                    success_url=f"{BASE_URL}?success=true",
+                    cancel_url=f"{BASE_URL}?canceled=true",
+                )
+                return {
+                    "status": "success",
+                    "checkout_url": checkout_session.url,
+                    "session_id": checkout_session.id
+                }
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=str(e))
+
+        @self.app.get("/payment-success")
+        async def payment_success(
+            session_id: str,
+            product_id: str,
+            current_user: User = Depends(self.get_current_user)
+        ):
+            try:
+                # 1. Получаем данные из Stripe
+                product = stripe.Product.retrieve(product_id)
+                session = stripe.checkout.Session.retrieve(session_id)
+                
+                # 2. Проверяем статус платежа
+                if session.payment_status != 'paid':
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Payment not completed or failed"
+                    )
+                
+                # 3. Получаем сумму пополнения из metadata продукта
+                amount = int(product.metadata.get('amount', 0))
+                if amount <= 0:
+                    raise HTTPException(
+                        status_code=400,
+                        detail="Invalid amount in product metadata"
+                    )
+                
+                # 4. Обновляем баланс пользователя
+                async with self.db_manager.get_db() as db:
+                    db_user = await db.get(User, current_user.id)
+                    if not db_user:
+                        raise HTTPException(
+                            status_code=404,
+                            detail="User not found"
+                        )
+                    
+                    db_user.money += amount
+                    await db.commit()
+                    await db.refresh(db_user)
+                
+                return {
+                    "status": "success",
+                    "message": "Balance updated successfully",
+                    "new_balance": db_user.money,
+                    "session_id": session_id
+                }
+                
+            except stripe.error.StripeError as e:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"Stripe error: {str(e)}"
+                )
+            except HTTPException:
+                raise
+            except Exception as e:
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Internal server error: {str(e)}"
+                )
+
+        @self.app.get("/current-money")
+        async def current_money(current_user: User = Depends(self.get_current_user)):
+            return {"balance": current_user.money}
+
+    def run(self, host="0.0.0.0", port=8000):
+        uvicorn.run(self.app, host=host, port=port)
+
+if __name__ == "__main__":
+    app = FastAPIApp()
+    app.run()
+
+# main.py
+
+import asyncio
+from app import FastAPIApp
+from utils.server_logger import ServerLogger
+import uvicorn
+import signal
+import sys
+import os
+from dotenv import load_dotenv
+
+load_dotenv()
+
+class Server:
+    def __init__(self):
+        self.logger = ServerLogger()
+        self.app = None
+        
+        # Настраиваем обработчики сигналов для корректного завершения
+        signal.signal(signal.SIGINT, self.signal_handler)
+        signal.signal(signal.SIGTERM, self.signal_handler)
+
+    async def init_app(self):
+        """Асинхронная инициализация приложения"""
+        self.logger.info("Инициализация приложения...")
+        self.app = FastAPIApp()
+        await self.app.load_model()
+        self.logger.info("Приложение инициализировано успешно")
+        return self.app
+
+    def signal_handler(self, signum, frame):
+        """Обработчик сигналов для корректного завершения"""
+        self.logger.info(f"Получен сигнал {signum}. Начало завершения работы...")
+        asyncio.create_task(self.cleanup())
+        sys.exit(0)
+
+    async def cleanup(self):
+        """Очистка ресурсов при завершении"""
+        self.logger.info("Начало очистки ресурсов...")
+        if hasattr(self.app, 'cleanup'):
+            await self.app.cleanup()
+        self.logger.info("Очистка ресурсов завершена")
+
+    async def run_server(self):
+        """Запуск сервера"""
+        try:
+            # Инициализация приложения
+            self.app = await self.init_app()
+            
+            # Запуск сервера
+            self.logger.info("Запуск сервера...")
+            config = uvicorn.Config(
+                app=self.app.app,
+                #host=os.getenv("API_URL"),
+                host="127.0.0.1",
+                port=8000,
+                log_level="info"
+            )
+            server = uvicorn.Server(config)
+            await server.serve()
+            
+        except Exception as e:
+            self.logger.log_error(e, "server_run")
+            await self.cleanup()
+            raise
+        finally:
+            await self.cleanup()
+
+if __name__ == "__main__":
+    server = Server()
+    try:
+        asyncio.run(server.run_server())
+    except KeyboardInterrupt:
+        print("\nПолучен сигнал прерывания. Завершение работы...")
+    except Exception as e:
+        print(f"Критическая ошибка: {str(e)}")
+    finally:
+        if server.app:
+            asyncio.run(server.cleanup())
+
+# auth\user_auth.py
+
+from datetime import datetime, timedelta
+import jwt
+from jwt import PyJWTError
+from fastapi import Depends, HTTPException, status
+from fastapi.security import OAuth2PasswordBearer
+from models.user import *
+from db.db_manager import DBManager
+from passlib.context import CryptContext
+import os
+from dotenv import load_dotenv
+from db.model_db import User
+
+load_dotenv()
+
+oauth2_scheme = OAuth2PasswordBearer(tokenUrl="token")
+
+class UserAuth:
+    def __init__(self, db_manager: DBManager):
+        self.db_manager = db_manager
+        self.SECRET_KEY = os.getenv("SECRET_KEY", "secret")
+        self.ALGORITHM = os.getenv("ALGORITHM", "HS256")
+        self.ACCESS_TOKEN_EXPIRE_MINUTES = int(os.getenv("ACCESS_TOKEN_EXPIRE_MINUTES", 30))
+        self.pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+    def verify_password(self, plain_password: str, hashed_password: str) -> bool:
+        return self.pwd_context.verify(plain_password, hashed_password)
+
+    def get_password_hash(self, password: str) -> str:
+        return self.pwd_context.hash(password)
+
+    def create_access_token(self, data: dict) -> str:
+        to_encode = data.copy()
+        expire = datetime.utcnow() + timedelta(minutes=self.ACCESS_TOKEN_EXPIRE_MINUTES)
+        to_encode.update({"exp": expire})
+        return jwt.encode(to_encode, self.SECRET_KEY, algorithm=self.ALGORITHM)
+
+    async def get_current_user(self, token: str = Depends(oauth2_scheme)) -> User:
+        credentials_exception = HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Could not validate credentials",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+        try:
+            payload = jwt.decode(token, self.SECRET_KEY, algorithms=[self.ALGORITHM])
+            email: str = payload.get("sub")
+            if email is None:
+                raise credentials_exception
+        except PyJWTError:
+            raise credentials_exception
+
+        async with self.db_manager.get_db() as db:
+            user = await self.db_manager.get_user_by_email(email, db)
+        
+        if user is None:
+            raise credentials_exception
+        return user
+
+# db\config.py
+
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+class Settings(BaseSettings):
+    DB_HOST: str
+    DB_PORT: int
+    DB_USER: str
+    DB_PASS: str
+    DB_NAME: str
+
+    @property
+    def DB_URL(self):
+        return f"postgresql+asyncpg://{self.DB_USER}:{self.DB_PASS}@{self.DB_HOST}:{self.DB_PORT}/{self.DB_NAME}"
+
+    model_config = SettingsConfigDict(env_file=".env")
+settings = Settings()
+
+# db\db_manager.py
+
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import sessionmaker
+from sqlalchemy.future import select
+from contextlib import asynccontextmanager
+from typing import AsyncGenerator
+from models.user import *
+from passlib.context import CryptContext
+from db.model_db import User, Base
+
+pwd_context = CryptContext(schemes=["bcrypt"], deprecated="auto")
+
+class DBManager:
+    def __init__(self, database_url: str):
+        self.engine = create_async_engine(database_url)
+        self.async_session = sessionmaker(
+            self.engine, class_=AsyncSession, expire_on_commit=False
+        )
+
+    async def create_tables(self):
+        async with self.engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+
+    @asynccontextmanager
+    async def get_db(self) -> AsyncGenerator[AsyncSession, None]:
+        async with self.async_session() as session:
+            try:
+                yield session
+                await session.commit()
+            except Exception:
+                await session.rollback()
+                raise
+            finally:
+                await session.close()
+
+    async def add_user(self, user_data, db: AsyncSession) -> User:
+        hashed_password = pwd_context.hash(user_data.password)
+        db_user = User(email=user_data.email, hashed_password=hashed_password)
+        db.add(db_user)
+        await db.commit()
+        await db.refresh(db_user)
+        return db_user
+
+    async def get_user_by_email(self, email: str, db: AsyncSession) -> User | None:
+        result = await db.execute(select(User).where(User.email == email))
+        return result.scalars().first()
+
+    async def update_user_balance(self, user: User, amount: int, db: AsyncSession) -> User:
+        user.money += amount
+        await db.commit()
+        await db.refresh(user)
+        return user
+    
+    async def deduct_credits(self, user: User, amount: int, db: AsyncSession) -> User:
+        """Списание кредитов с баланса пользователя"""
+        # Получаем актуальную версию пользователя из БД
+        db_user = await db.get(User, user.id)
+        if not db_user:
+            raise ValueError("Пользователь не найден")
+        
+        if db_user.money < amount:
+            raise ValueError("Недостаточно средств на счете")
+        
+        db_user.money -= amount
+        await db.commit()
+        await db.refresh(db_user)
+        return db_user
+
+# db\model_db.py
+
+from sqlalchemy import Column, Integer, String
+from sqlalchemy.ext.declarative import declarative_base
+from models.user import UserPublic
+
+Base = declarative_base()
+
+class User(Base):
+    __tablename__ = "users"
+
+    id = Column(Integer, primary_key=True, index=True)
+    email = Column(String, unique=True, index=True)
+    hashed_password = Column(String)
+    money = Column(Integer, default=0)
+
+    def to_public(self):
+        return UserPublic(
+            id=self.id,
+            email=self.email,
+            money=self.money
+        )
+
+# models\user.py
+
+from pydantic import BaseModel, EmailStr
+from typing import Optional
+
+class UserBase(BaseModel):
+    email: EmailStr
+
+class UserCreate(UserBase):
+    password: str
+
+class UserPublic(UserBase):
+    id: int
+    money: int = 0
+
+class Token(BaseModel):
+    access_token: str
+    token_type: str
+
+class TokenData(BaseModel):
+    email: Optional[str] = None
+
+
+# model_srgan\generator.py
+
+import torch
+import torch.nn as nn
+
+class GenBlock(nn.Module):  #Conv -> BN? -> PReLU?
+  def __init__(
+      self,
+      in_channels,
+      out_channels,
+      use_bn = True,
+      use_act = True,
+      **kwargs
+    ):
+    super().__init__()
+
+    self.block = nn.Sequential()
+    self.block.add_module(
+        "Conv",
+        module = nn.Conv2d(in_channels, out_channels, **kwargs, bias = not use_bn)
+    )
+    if (use_bn):
+      self.block.add_module(
+          "BatchNorm",
+          module = nn.BatchNorm2d(out_channels)
+      )
+    if (use_act):
+      self.block.add_module(
+          "Act",
+          module = nn.PReLU(num_parameters=out_channels)
+      )
+
+  def forward(self, x):
+    return self.block(x)
+
+class ResidualBlock(nn.Module):
+  def __init__(self, in_channels):
+    super().__init__()
+    self.block1 = GenBlock(
+        in_channels,
+        in_channels,
+        kernel_size=3,
+        stride=1,
+        padding=1
+    )
+    self.block2 = GenBlock(
+        in_channels,
+        in_channels,
+        use_act=False,
+        kernel_size=3,
+        stride=1,
+        padding=1
+    )
+
+  def forward(self, x):
+    out = self.block1(x)
+    out = self.block2(out)
+    return out + x
+
+class UpsamplingBlock(nn.Module):  #Conv -> PixelShuffle -> PReLU
+  def __init__(self, in_channels, scale_factor):
+    super().__init__()
+    self.block = nn.Sequential(
+        nn.Conv2d(in_channels, in_channels * scale_factor ** 2, kernel_size = 3, stride = 1, padding = 1),
+        nn.PixelShuffle(scale_factor), # # in_c * scale_factor, H, W --> in_c, H*scale_factor/2, W*scale_factor/2
+        nn.PReLU(num_parameters=in_channels)
+    )
+
+  def forward(self, x):
+    return self.block(x)
+  
+
+class Generator(nn.Module):
+  def __init__(self, in_channels=3, num_channels=64, num_blocks=16, scale = 2):
+    super().__init__()
+    self.initial = GenBlock(
+        in_channels,
+        num_channels,
+        kernel_size = 9,
+        stride = 1,
+        padding = 4,
+        use_bn= False
+    )
+
+    self.residual_blocks = nn.Sequential(*[ResidualBlock(num_channels) for _ in range(num_blocks)])
+
+    self.conv_block = GenBlock(
+        num_channels,
+        num_channels,
+        kernel_size = 3,
+        stride = 1,
+        padding = 1,
+        use_act= False
+    )
+
+    self.upsampling_blocks = nn.Sequential(
+        UpsamplingBlock(num_channels, scale),
+        UpsamplingBlock(num_channels, scale)
+    )
+
+    self.final = nn.Conv2d(num_channels, in_channels, kernel_size=9, stride=1, padding=4)
+
+  def forward(self, x):
+    init = self.initial(x)
+    x = self.residual_blocks(init)
+    x = self.conv_block(x) + init
+    x = self.upsampling_blocks(x)
+    return torch.tanh(self.final(x))
+
+# model_srgan\srgan_wrapper.py
+
+import numpy as np
+import torch
+from model_srgan.generator import Generator
+from transform.transform import Transforms
+import io
+from PIL import Image
+import base64
+from typing import Optional
+from utils.server_logger import ServerLogger
+import os
+import cv2
+
+class SRGANWrapper:
+    def __init__(self):
+        """Инициализация обертки для модели SRGAN"""
+        self.logger = ServerLogger()
+        self.device = "cuda" if torch.cuda.is_available() else "cpu"
+        self.model = Generator(in_channels=3).to(self.device)
+        self.transform = Transforms()
+        self.ready = False
+        self.logger.info(f"Initialized SRGAN wrapper on device: {self.device}")
+    
+    async def load_model(self) -> bool:
+        """Загрузка модели SRGAN"""
+        try:
+            # Для асинхронной загрузки модели используем executor
+            checkpoint = torch.load(os.getenv("PATH_TO_MODEL"),map_location=self.device) # тут загрузка generatora
+            self.model.load_state_dict(checkpoint["generator_state_dict"])
+            
+            self.model.eval()
+            self.ready = True
+            # return True
+        except Exception as e:
+            print(f"Ошибка при загрузке модели SRGAN: {e}")
+            self.ready = False
+            # return False
+    
+    async def upscale_image(self, image_data: bytes, scale_factor: int = 4, use_decoration: bool = False) -> Optional[str]:
+        """Увеличение разрешения изображения с помощью SRGAN"""
+        if not self.ready or self.model is None:
+            self.logger.error("Model not loaded")
+            raise RuntimeError("Модель SRGAN не загружена")
+
+        try:
+            self.logger.log_image_processing(len(image_data), None)
+            
+            if len(image_data) == 0:
+                raise ValueError("Получены пустые данные изображения")
+            
+            image_bytes = io.BytesIO(image_data)
+            image_bytes.seek(0)
+            
+            try:
+                img = Image.open(image_bytes)
+                img = img.convert('RGB')
+                self.logger.debug(f"Image opened: format={img.format}, mode={img.mode}")
+            except Exception as img_error:
+                self.logger.log_error(img_error, "image_opening")
+                raise
+            
+            img_array = np.array(img)
+            self.logger.debug(f"Image converted to array: shape={img_array.shape}")
+            
+            if img_array.shape[0] > 1000 or img_array.shape[1] > 1000:
+                raise ValueError("Большое изображение")            
+
+            SR_image = await self.upscale_x4(use_decoration, img_array)
+
+            if scale_factor == 2 or scale_factor == 8:
+                SR_image = cv2.resize(SR_image, None, fx=0.5, fy=0.5, interpolation=cv2.INTER_LANCZOS4)
+                if scale_factor == 8:
+                    SR_image = np.array(Image.fromarray((SR_image * 255).astype(np.uint8)))
+                    SR_image = await self.upscale_x4(use_decoration, SR_image)
+
+            
+            result_img = Image.fromarray((SR_image * 255).astype(np.uint8))
+            buffer = io.BytesIO()
+            result_img.save(buffer, format="PNG")
+            img_str = base64.b64encode(buffer.getvalue()).decode("utf-8")
+            
+            return img_str
+        except Exception as e:
+            self.logger.log_error(e, "upscale_image")
+            return None
+
+    async def upscale_x4(self, use_decoration, img_array):
+        pre_image = await self.preprocessing(img_array)
+            
+        with torch.no_grad():
+            SR_image = self.model(pre_image)
+
+        SR_image = await self.postprocessing(SR_image, use_decoration)
+        return SR_image
+
+    async def postprocessing(self, SR_image, use_decoration: bool = False):
+        SR_image = SR_image.squeeze(0).permute(1, 2, 0).cpu().numpy()
+        SR_image= np.clip(SR_image, -1, 1)
+        SR_image = SR_image * 0.5 + 0.5
+
+        SR_image = np.clip(SR_image, 0, 1)
+
+        if use_decoration:
+            SR_image = cv2.bilateralFilter(SR_image, d=3, sigmaColor=75, sigmaSpace=75)
+        return SR_image
+    
+    async def preprocessing(self, low_image):
+        # Преобразуем изображение с помощью albumentations
+        #low_transform = await self.transform.get_lowres_transform(low_image.shape)
+        #preproc_image = low_transform(image=low_image)["image"]
+
+        preproc_image = self.transform.original_transform(image=low_image)["image"]
+        # Добавляем batch dimension и перемещаем на устройство (GPU/CPU)
+        preproc_image = preproc_image.unsqueeze(0).to(self.device)
+
+        return preproc_image
+        
+    def is_ready(self) -> bool:
+        """Проверка готовности модели"""
+        return self.ready 
+
+# transform\transform.py
+
+import albumentations as A
+from albumentations.pytorch import ToTensorV2
+from PIL import Image
+
+class Transforms:
+    def __init__(self, high_res = 256, low_res_scale_factor=4):
+        self.high_res = high_res
+        self.low_res_scale_factor = low_res_scale_factor
+
+        self.original_transform = A.Compose(
+            [
+                A.Normalize(mean=[0, 0, 0], std=[1, 1, 1]),
+                ToTensorV2(),
+            ]
+        )
+
+    async def get_lowres_transform(self, image_shape):
+        """
+        Создает преобразования для low-res изображений на основе размера входного изображения.
+        """
+        low_res_width = max(image_shape[1] // self.low_res_scale_factor, 1)
+        low_res_height = max(image_shape[0] // self.low_res_scale_factor, 1)
+        return A.Compose(
+            [
+                A.Resize(width=low_res_width, height=low_res_height, interpolation=Image.BICUBIC),
+                A.Normalize(mean=[0, 0, 0], std=[1, 1, 1]),
+                ToTensorV2(),
+            ]
+        )
+
+# utils\server_logger.py
+
+import logging
+from datetime import datetime
+import os
+
+class ServerLogger:
+    def __init__(self, log_dir: str = "logs/server"):
+        self.logger = logging.getLogger("server_logger")
+        self.logger.setLevel(logging.DEBUG)
+        
+        # Создаем директорию для логов, если её нет
+        if not os.path.exists(log_dir):
+            os.makedirs(log_dir)
+            
+        # Формат логов
+        formatter = logging.Formatter(
+            '%(asctime)s - %(levelname)s - %(message)s'
+        )
+        
+        # Файловый обработчик
+        file_handler = logging.FileHandler(
+            os.path.join(log_dir, f"server_{datetime.now().strftime('%Y%m%d')}.log"),
+            encoding='utf-8'
+        )
+        file_handler.setLevel(logging.DEBUG)
+        file_handler.setFormatter(formatter)
+        
+        # Консольный обработчик
+        console_handler = logging.StreamHandler()
+        console_handler.setLevel(logging.INFO)
+        console_handler.setFormatter(formatter)
+        
+        # Очищаем существующие обработчики
+        if self.logger.handlers:
+            self.logger.handlers.clear()
+            
+        # Добавляем обработчики
+        self.logger.addHandler(file_handler)
+        self.logger.addHandler(console_handler)
+
+    def debug(self, message: str):
+        self.logger.debug(message)
+    
+    def info(self, message: str):
+        self.logger.info(message)
+    
+    def warning(self, message: str):
+        self.logger.warning(message)
+    
+    def error(self, message: str):
+        self.logger.error(message)
+    
+    def log_request(self, method: str, path: str, status_code: int):
+        self.info(f"Запрос: {method} {path} - Статус: {status_code}")
+    
+    def log_model_status(self, status: str):
+        self.info(f"Статус модели: {status}")
+    
+    def log_image_processing(self, image_size: int, shape: tuple = None):
+        self.debug(f"Обработка изображения: размер={image_size} байт, форма={shape}")
+    
+    def log_error(self, error: Exception, context: str = ""):
+        self.error(f"Ошибка в {context}: {str(error)}")
+

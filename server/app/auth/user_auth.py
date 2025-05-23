@@ -8,6 +8,7 @@ from db.db_manager import DBManager
 from passlib.context import CryptContext
 import os
 from dotenv import load_dotenv
+from db.model_db import User
 
 load_dotenv()
 

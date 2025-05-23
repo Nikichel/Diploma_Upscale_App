@@ -55,7 +55,7 @@ class SRGANClient:
             )
             if response.status_code == 200:
                 return response.json()
-            return None
+            return {"detail": response.json().get("detail", "Registration failed")}
         except Exception as e:
             self.logger.log_error(e, "login")
             return None
