@@ -89,14 +89,14 @@ cd resup
 	cd server  
 	python app/main.py
 ```
-	Сервер запустится на http://localhost:8000.
+Сервер запустится на http://localhost:8000.
 
 7. Запуск клиента (Streamlit)
 ```bash
 	cd client  
 	streamlit run streamlit_app.py
 ```
-	Клиент откроется в браузере на http://localhost:8501.
+Клиент откроется в браузере на http://localhost:8501.
 
 8. Тестирование Stripe
 	Используйте тестовые карты Stripe (например, 4242 4242 4242 4242).
