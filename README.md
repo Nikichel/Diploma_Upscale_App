@@ -24,9 +24,9 @@
 - Поддержка CUDA для GPU-ускорения
 
 **Примеры улучшений:**
-| Оригинал (256x256) | 4x Upscale (1024x1024) |
-|--------------------|-------------------------|
-| ![Original](demo/original.jpg) | ![Upscaled](demo/upscaled.png) |
+| Оригинал | x2 Upscale | x4 Upscale | x8 Upscale |
+|---------------------|-----------------------|-------------------------|--------------------------|
+| ![Original](demo/orig_ship.jpg) | ![x2](demo/x2_enhanced_ship.jpg) | ![x4](demo/x4_enhanced_ship.jpg) | ![x8](demo/x8_enhanced_ship.jpg) |
 
 ## Технологический стек ⚙️
 **Клиент:**
