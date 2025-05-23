@@ -51,3 +51,49 @@
 ```bash
 git clone https://github.com/yourusername/resup.git
 cd resup
+
+2. Настройка окружения
+Установите:
+	Python 3.10+
+	PostgreSQL (или Docker для запуска через контейнер).
+	Stripe CLI (для тестовых платежей).
+
+3. Настройка переменных окружения
+Создайте файл .env в корне проекта:
+
+	env
+	# Сервер  
+	DB_HOST=localhost  
+	DB_PORT=5432  
+	DB_USER=postgres 
+	DB_PASS=postgres  
+	DB_NAME=srgan_db  
+
+	# Stripe (тестовые ключи)  
+	STRIPE_SECRET_KEY=sk_test_...  
+	STRIPE_PUBLIC_KEY=pk_test_...  
+ 
+	SECRET_KEY=your_secret_key  
+	ALGORITHM=HS256  
+	PATH_TO_MODEL=gen_and_disc.pth 
+
+4. Запуск PostgreSQL
+
+5. Установка зависимостей
+
+	pip install -r requirements.txt  
+
+6. Запуск сервера
+
+	cd server  
+	python app/main.py  
+	Сервер запустится на http://localhost:8000.
+
+7. Запуск клиента (Streamlit)
+
+	cd client  
+	streamlit run streamlit_app.py  
+	Клиент откроется в браузере на http://localhost:8501.
+
+8. Тестирование Stripe
+	Используйте тестовые карты Stripe (например, 4242 4242 4242 4242).
