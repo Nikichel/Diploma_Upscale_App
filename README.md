@@ -26,7 +26,7 @@
 **Примеры улучшений:**
 | Оригинал | x2 Upscale | x4 Upscale | x8 Upscale |
 |---------------------|-----------------------|-------------------------|--------------------------|
-| <img src="demo/orig_ship.png" width="300"> | <img src="demo/x2_enhanced_ship.png" width="300"> | <img src="demo/x4_enhanced _ship.png" width="300"> | <img src="demo/x8_enhanced _ship.png" width="300"> |
+| <img src="demo/orig_ship.png" width="400"> | <img src="demo/x2_enhanced_ship.png" width="400"> | <img src="demo/x4_enhanced _ship.png" width="400"> | <img src="demo/x8_enhanced _ship.png" width="400"> |
 
 ## Технологический стек ⚙️
 **Клиент:**
