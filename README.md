@@ -53,7 +53,7 @@
 
 1. Клонировать репозиторий:
 ```bash
-git clone https://github.com/yourusername/resup.git
+git clone https://github.com/nikitoSSka/Diploma_Upscale_App.git
 cd resup
 ```
 
